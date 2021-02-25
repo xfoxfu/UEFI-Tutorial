@@ -58,6 +58,129 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
 
 对于 Rust 语言，则推荐使用 [uefi](https://lib.rs/crates/uefi) 库。
 
-<!-- TODO: 应用程序实例 -->
+## 图形绘制应用程序
+
+> **TODO**：关于 C++ 的版本尚未完成，可以参考 [POSIX-UEFI](https://gitlab.com/bztsrc/posix-uefi/-/tree/master/examples) 的例子。
+
+### SystemTable
+
+对于 UEFI，所有的信息均通过 SystemTable 提供。SystemTable 定义为
+
+```cpp
+typedef struct {
+    efi_table_header_t              Hdr;
+
+    wchar_t                         *FirmwareVendor;
+    uint32_t                        FirmwareRevision;
+
+    efi_handle_t                    ConsoleInHandle;
+    simple_input_interface_t        *ConIn;
+
+    efi_handle_t                    ConsoleOutHandle;
+    simple_text_output_interface_t  *ConOut;
+
+    efi_handle_t                    ConsoleErrorHandle;
+    simple_text_output_interface_t  *StdErr;
+
+    efi_runtime_services_t          *RuntimeServices;
+    efi_boot_services_t             *BootServices;
+
+    uintn_t                         NumberOfTableEntries;
+    efi_configuration_table_t       *ConfigurationTable;
+} efi_system_table_t;
+```
+
+对于 POSIX-UEFI，可以通过全局变量 `ST` 访问 SystemTable。对于 gnu-efi，其通过 `efi_main` 函数的第二个参数提供。
+
+SystemTable 提供的服务可以分为两个部分，`RuntimeServices` 和 `BootServices`。RuntimeServices 是 UEFI 在操作系统运行时提供的服务，包括一些基础的时钟、内存布局等信息。BootServices 是 UEFI 在机器的引导阶段（未进入操作系统时）提供的服务，包括磁盘读取、内存分配、硬件驱动等功能，使得引导程序「几乎」和操作系统上运行没有区别。
+
+此外，SystemTable 提供了输入输出功能，对于有文本终端的设备（比如树莓派），其将利用文本终端；对于没有文本终端的设备（比如我们的计算机），会利用键盘和显示器进行模拟输入输出。
+
+要进行文本的输入输出，我们可以直接使用这里的输入输出调用，也可以利用 gnu-efi 或者 POSIX-UEFI 提供的输入输出函数（如 `printf`）进行输入输出。Rust 的 uefi 库提供了和标准库一致的输入输出接口。
+
+### Protocol
+
+要进行图形绘制，我们需要调用 UEFI 中的驱动程序。驱动程序在 UEFI 中被称为 Protocol，通过 GUID 进行标识。GUID 是强类型的，也就是说相同的 GUID 均对应相同的一个 Protocol，如 `EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID` 就对应了 `efi_gop_t`。
+
+我们通过 BootServices 的 `LocateProtocol` 获得 Protocol 的指针。例如，POSIX-UEFI 中可以编写
+
+```cpp
+efi_status_t status;
+efi_guid_t gopGuid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
+efi_gop_t *gop = NULL;
+status = BS->LocateProtocol(&gopGuid, NULL, (void**)&gop);
+```
+
+从而获得 GOP Protocol，这也就是基本图形绘制驱动。
+
+对于 Rust uefi 库，我们也可以类似地实现
+
+```rust
+uefi_services::init(&st).expect_success("failed to initialize utilities");
+
+let bs = st.boot_services();
+
+let gop = bs
+    .locate_protocol::<GraphicsOutput>()
+    .expect_success("failed to get GraphicsOutput");
+let gop = unsafe { &mut *gop.get() };
+```
+
+其它繁多的 UEFI 功能均以 Protocol 的形式提供，各位读者可以自行探索。例如，需要访问文件系统可以使用 `EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID`，当然，对于 POSIX-UEFI 可以使用和普通 C/C++ 程序类似的 `fopen`。
+
+### GOP 显存
+
+UEFI 中提供了一个非常初等的显示驱动，称为 GOP (GraphicsOutput)。和 BIOS 的 VGA/BGA/TGA 显存放置在内存的特定位置不同，GOP 的显存位置是不确定的，需要通过函数调用获得。这个显示驱动的性能较差，但对于我们的引导程序以及操作系统原型来说足够了，否则就需要初始化 PCI 总线并编写显卡驱动，这显然超出了操作系统课程的范围。
+
+前面已经介绍过了 Rust 语言获得 GOP 驱动的方法，下面我们来获得一些信息：
+
+```rust
+let mode = gop.current_mode_info();
+let (display_x, display_y) = mode.resolution();
+let (display_x, display_y) = (display_x as isize, display_y as isize);
+let fb_addr = gop.frame_buffer().as_mut_ptr() as u64;
+let fb_size = gop.frame_buffer().size() as u64;
+```
+
+这里我们分别获得了显示模式、分辨率和显存地址、大小。显存被称为 `frame_buffer`。
+
+显存是一个矩阵，存储了各个点的像素值，按照行集中存储。因此，用下面的代码，我们可以修改像素的颜色
+
+```rust
+let stride = mode.stride();
+unsafe {
+    *(fb_addr as *mut u32)
+        .offset(row * stride + col)
+        .as_mut()
+        .unwrap() = COLORS[color];
+}
+```
+
+其中，`stride` 是行存储的大小，可能比像素数略大，因为要考虑到元素对其以提高性能。彩色像素的格式由 `mode.pixel_format()` 指定，例如 `PixelFormat::Rgb` 代表「Each pixel is 32-bit long, with 24-bit RGB, and the last byte is reserved.」
+
+### 构建
+
+UEFI 应用程序的构建是比较容易的，对于使用 C++ 的读者，我们可以参考 POSIX-UEFI 的[例子]((https://gitlab.com/bztsrc/posix-uefi/-/blob/master/examples/01_helloworld/Makefile)，编写 Makefile 来构建。
+
+对于 Rust 语言，我们则直接利用 cargo 进行构建，并且利用 Makefile 来生成 UEFI 所需要的文件结构，可以参考 [rust-xos](https://github.com/xfoxfu/rust-xos/tree/2cc61ad6d3a894801cb74d23d55de2a52f1cd007)。
+
+我们利用 QEMU 来执行程序，利用好 QEMU 提供的直接将本地路径作为虚拟磁盘的方法，可以这样运行 UEFI 程序：
+
+```bash
+mkdir -p $(ESP)/EFI/Boot
+cp $(EFI) $(ESP)/EFI/Boot/BootX64.efi
+qemu-system-x86_64 \
+    -bios ${OVMF} \
+    -drive format=raw,file=fat:rw:${ESP}
+```
+
+其中需要用到 OVMF 来模拟 EFI 环境，这可以从 [tianocore 的网站](https://sourceforge.net/projects/edk2/files/OVMF/) 获得。
+
+此外，也可以利用 `uefi-run` 来执行，安装方法为：
+
+```bash
+cargo install uefi-run
+uefi-run -b /path/to/OVMF.fd -q $(which qemu) app.efi
+```
 
 <!-- ## 附录：关于 arm 指令集 -->

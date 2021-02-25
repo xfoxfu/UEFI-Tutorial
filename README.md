@@ -8,9 +8,8 @@
 
 以下计划仅供参考，其中的顺序可能发生调整。
 
-- [ ] 利用 UEFI 引导启动计算机
+- [ ] [利用 UEFI 引导启动计算机](https://github.com/xfoxfu/UEFI-Tutorial/blob/master/1-Basic-Application.md)
 - [ ] UEFI 加载 ELF 格式的可执行文件
-- [ ] GOP 显存绘制图形及模拟终端
 - [ ] MMIO、APIC 中断控制器和键盘输入
 - [ ] FAT16E 分区表结构
 - [ ] 长模式分页内存体系和可执行文件加载
